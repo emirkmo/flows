@@ -11,9 +11,11 @@ import os
 import zipfile
 import requests
 import shutil
+import glob
 from tqdm import tqdm
 from .. import api
 from ..config import load_config
+from ..utilities import get_filehash
 
 #--------------------------------------------------------------------------------------------------
 def upload_photometry(fileid, delete_completed=False):
@@ -48,15 +50,25 @@ def upload_photometry(fileid, delete_completed=False):
 	if not os.path.isdir(photdir):
 		raise FileNotFoundError(photdir)
 
-	fname_zip = '{0:05d}.zip'.format(fileid)
-	fpath_zip = os.path.join(photdir, fname_zip)
-	files = os.listdir(photdir)
-	if fname_zip in files:
-		files.remove(fname_zip)
+	files_existing = os.listdir(photdir)
 
 	# Make sure required files are actually there:
-	if 'photometry.ecsv' not in files:
+	if 'photometry.ecsv' not in files_existing:
 		raise FileNotFoundError(os.path.join(photdir, 'photometry.ecsv'))
+	if 'photometry.log' not in files_existing:
+		raise FileNotFoundError(os.path.join(photdir, 'photometry.log'))
+
+	# Create list of files to be uploaded:
+	files = [
+		os.path.join(photdir, 'photometry.ecsv'),
+		os.path.join(photdir, 'photometry.log')
+	]
+	files += glob.glob(os.path.join(photdir, '*.png'))
+
+	# Path to the ZIP file:
+	# TODO: Use tempfile instead?
+	fname_zip = '{0:05d}.zip'.format(fileid)
+	fpath_zip = os.path.join(photdir, fname_zip)
 
 	try:
 		# Create ZIP file with all the files:
@@ -64,6 +76,9 @@ def upload_photometry(fileid, delete_completed=False):
 			for f in tqdm(files, desc='Zipping {0:d}'.format(fileid), **tqdm_settings):
 				logger.debug('Zipping %s', f)
 				z.write(os.path.join(photdir, f), f)
+
+		# Change the name of the uploaded file to contain the file hash:
+		fname_zip = '{0:05d}-{1:s}.zip'.format(fileid, get_filehash(fpath_zip))
 
 		# Send file to the API:
 		logger.info("Uploading to server...")
@@ -85,5 +100,8 @@ def upload_photometry(fileid, delete_completed=False):
 
 	# If we have made it this far, the upload must have been a success:
 	if delete_completed:
-		logger.info("Deleting photometry from workdir: '%s'", photdir)
-		shutil.rmtree(photdir)
+		if set([os.path.basename(f) for f in files]) == set(os.listdir(photdir)):
+			logger.info("Deleting photometry from workdir: '%s'", photdir)
+			shutil.rmtree(photdir, ignore_errors=True)
+		else:
+			logger.warning("Not deleting photometry from workdir: '%s'", photdir)

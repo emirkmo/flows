@@ -49,7 +49,8 @@ def get_catalog(target, radius=None, output='table'):
 
 	# Convert timestamps to actual Time objects:
 	jsn['target']['inserted'] = Time(jsn['target']['inserted'], scale='utc')
-	jsn['target']['discovery_date'] = Time(jsn['target']['discovery_date'], scale='utc')
+	if jsn['target']['discovery_date'] is not None:
+		jsn['target']['discovery_date'] = Time(jsn['target']['discovery_date'], scale='utc')
 
 	if output in ('json', 'dict'):
 		return jsn
@@ -57,8 +58,8 @@ def get_catalog(target, radius=None, output='table'):
 	dict_tables = {}
 
 	tab = Table(
-		names=('targetid', 'target_name', 'ra', 'decl', 'redshift', 'redshift_error', 'discovery_mag', 'catalog_downloaded', 'pointing_model_created', 'inserted', 'discovery_date', 'project', 'host_galaxy'),
-		dtype=('int32', 'str', 'float64', 'float64', 'float32', 'float32', 'float32', 'bool', 'bool', 'object', 'object', 'str', 'str'),
+		names=('targetid', 'target_name', 'ra', 'decl', 'redshift', 'redshift_error', 'discovery_mag', 'catalog_downloaded', 'pointing_model_created', 'inserted', 'discovery_date', 'project', 'host_galaxy', 'ztf_id'),
+		dtype=('int32', 'str', 'float64', 'float64', 'float32', 'float32', 'float32', 'bool', 'bool', 'object', 'object', 'str', 'str', 'str'),
 		rows=[jsn['target']])
 
 	tab['ra'].description = 'Right ascension'

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+Plot photometry for target, loaded from local photometry working directory.
 
 .. codeauthor:: Emir K <emir.k@phys.au.dk>
 .. codeauthor:: Rasmus Handberg <rasmush@phys.au.dk>
@@ -19,8 +20,7 @@ import seaborn as sns
 #--------------------------------------------------------------------------------------------------
 def main():
 	# All available filters:
-	# TODO: Get this from the Flows API
-	all_filters = ['B', 'V', 'rp', 'gp', 'rp', 'ip', 'zp', 'H', 'J', 'K']
+	all_filters = list(api.get_filters().keys())
 
 	# Parser:
 	parser = argparse.ArgumentParser(description='Plot photometry for target')
@@ -131,7 +131,7 @@ def main():
 		lc = phot[phot['filter'] == str(sel.artist.get_label())]
 		point = lc[sel.target.index]
 		point = dict(zip(point.colnames, point)) # Convert table row to dict
-		return sel.annotation.set_text("Fileid: {fileid:d}\nJD: {jd:.3f}\nMag: {mag:.2f}$\pm${mag_err:.2f}".format(**point))
+		return sel.annotation.set_text("Fileid: {fileid:d}\nJD: {jd:.3f}\nMag: {mag:.2f}$\\pm${mag_err:.2f}".format(**point))
 
 	mplcursors.cursor(ax).connect("add", annotate)
 	plt.show(block=True)
