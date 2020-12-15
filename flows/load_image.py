@@ -33,7 +33,7 @@ def load_image(FILENAME):
 	image = type('image', (object,), dict()) # image container
 
 	# get image and wcs solution
-	with fits.open(FILENAME, mode='readonly', memmap=True) as hdul:
+	with fits.open(FILENAME, mode='readonly') as hdul:
 		hdr = hdul[0].header
 		origin = hdr.get('ORIGIN')
 
@@ -155,6 +155,13 @@ def load_image(FILENAME):
 				'SDSS-I': 'ip',
 				'SDSS-Z': 'zp'
 			}.get(hdr['FILTER1'], hdr['FILTER1'])
+
+		elif hdr.get('TELESCOP') == 'CA 3.5m' and hdr.get('INSTRUME') == 'Omega2000':
+			# Calar Alto 3.5m (Omege2000)
+			image.site = api.get_site(9) # Hard-coded the siteid for Calar Alto 3.5m
+			image.obstime = Time(hdr['MJD-OBS'], format='mjd', scale='utc', location=image.site['EarthLocation'])
+			image.obstime += 0.5*image.exptime * u.second # Make time centre of exposure
+			image.photfilter = hdr['FILTER']
 
 		else:
 			raise Exception("Could not determine origin of image")

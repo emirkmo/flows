@@ -48,7 +48,7 @@ def main():
 
 	# Check that output directory exists:
 	if not os.path.isdir(output_dir):
-		parser.error("Output directory does not exist: '%s'" % output_dir)
+		parser.error("Output directory does not exist: '%s'" % output_dir) # noqa: G002
 
 	# Use API to get list of targets to process:
 	if args.target is None:
@@ -80,14 +80,15 @@ def main():
 		for fid in np.unique(tab['photfilter']):
 			band = tab[tab['photfilter'] == fid]
 			ax.errorbar(band['mjd'], band['mag'], band['mag_err'],
-				ls='none', marker='.', label=fid)
+				ls='-', lw=0.5, marker='.', label=fid)
 
 		ax.invert_yaxis()
 		ax.set_title(target_name)
 		ax.set_xlabel('Time (MJD)')
 		ax.set_ylabel('Magnitude')
 		ax.legend()
-		fig.savefig(os.path.join(output_dir, '{0:s}-ztf.png'.format(target_name)), format='png')
+		fig.savefig(os.path.join(output_dir, '{0:s}-ztf.png'.format(target_name)), format='png', bbox_inches='tight')
+		plt.close(fig)
 
 #--------------------------------------------------------------------------------------------------
 if __name__ == '__main__':
