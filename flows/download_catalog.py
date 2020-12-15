@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 
@@ -11,13 +11,18 @@ import subprocess
 import shlex
 import requests
 import numpy as np
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import SkyCoord, Angle
 from astropy import units as u
 from .config import load_config
 from .aadc_db import AADC_DB
+from .ztf import query_ztf_id
 
 #--------------------------------------------------------------------------------------------------
 class CasjobsException(Exception):
+	pass
+
+#--------------------------------------------------------------------------------------------------
+class CasjobsMemoryError(Exception):
 	pass
 
 #--------------------------------------------------------------------------------------------------
@@ -66,13 +71,17 @@ def configure_casjobs(overwrite=False):
 			os.remove(casjobs_config)
 
 #--------------------------------------------------------------------------------------------------
-def query_casjobs_refcat2(coo_centre, radius=24.0/60.0):
+def query_casjobs_refcat2(coo_centre, radius=24*u.arcmin):
 	"""
 	Uses the CasJobs program to do a cone-search around the position.
 
+	Will first attempt to do single large cone-search, and if that
+	fails because of CasJobs memory limits, will sub-divide the cone
+	into smaller queries.
+
 	Parameters:
 		coo_centre (:class:`astropy.coordinates.SkyCoord`): Coordinates of centre of search cone.
-		radius (float, optional):
+		radius (Angle, optional): Search radius. Default is 24 arcmin.
 
 	Returns:
 		list: List of dicts with the REFCAT2 information.
@@ -81,11 +90,83 @@ def query_casjobs_refcat2(coo_centre, radius=24.0/60.0):
 	"""
 
 	logger = logging.getLogger(__name__)
+	if isinstance(radius, (float, int)):
+		radius *= u.deg
+
+	try:
+		results = _query_casjobs_refcat2(coo_centre, radius=radius)
+	except CasjobsMemoryError:
+		logger.debug("CasJobs failed with memory error. Trying to use smaller radii.")
+		results = _query_casjobs_refcat2_divide_and_conquer(coo_centre, radius=radius)
+
+	# Remove duplicate entries:
+	_, indx = np.unique([res['starid'] for res in results], return_index=True)
+	results = [results[k] for k in indx]
+
+	# Trim away anything outside radius:
+	ra = [res['ra'] for res in results]
+	decl = [res['decl'] for res in results]
+	coords = SkyCoord(ra=ra, dec=decl, unit='deg', frame='icrs')
+	sep = coords.separation(coo_centre)
+	results = [res for k,res in enumerate(results) if sep[k] <= radius]
+
+	logger.debug("Found %d unique results", len(results))
+	return results
+
+#--------------------------------------------------------------------------------------------------
+def _query_casjobs_refcat2_divide_and_conquer(coo_centre, radius):
+	logger = logging.getLogger(__name__)
+
+	# Just put in a stop criterion to avoid infinite recursion:
+	if radius < 0.04*u.deg:
+		raise Exception("Too many subdivides")
+
+	# Search central cone:
+	try:
+		results = _query_casjobs_refcat2(coo_centre, radius=0.5*radius)
+	except CasjobsMemoryError:
+		logger.debug("CasJobs failed with memory error. Trying to use smaller radii.")
+		results = _query_casjobs_refcat2_divide_and_conquer(coo_centre, radius=0.5*radius)
+
+	# Search six cones around central cone:
+	for n in range(6):
+		# FIXME: The 0.8 here is kind of a guess. There should be an analytic solution
+		new = SkyCoord(
+			ra=coo_centre.ra.deg + 0.8 * Angle(radius).deg * np.cos(n*60*np.pi/180),
+			dec=coo_centre.dec.deg + 0.8 * Angle(radius).deg * np.sin(n*60*np.pi/180),
+			unit='deg', frame='icrs')
+
+		try:
+			results += _query_casjobs_refcat2(new, radius=0.5*radius)
+		except CasjobsMemoryError:
+			logger.debug("CasJobs failed with memory error. Trying to use smaller radii.")
+			results += _query_casjobs_refcat2_divide_and_conquer(new, radius=0.5*radius)
+
+	return results
+
+#--------------------------------------------------------------------------------------------------
+def _query_casjobs_refcat2(coo_centre, radius=24*u.arcmin):
+	"""
+	Uses the CasJobs program to do a cone-search around the position.
+
+	Parameters:
+		coo_centre (:class:`astropy.coordinates.SkyCoord`): Coordinates of centre of search cone.
+		radius (Angle, optional): Search radius. Default is 24 arcmin.
+
+	Returns:
+		list: List of dicts with the REFCAT2 information.
+
+	.. codeauthor:: Rasmus Handberg <rasmush@phys.au.dk>
+	"""
+
+	logger = logging.getLogger(__name__)
+	if isinstance(radius, (float, int)):
+		radius *= u.deg
 
 	sql = "SELECT r.* FROM fGetNearbyObjEq({ra:f}, {dec:f}, {radius:f}) AS n INNER JOIN HLSP_ATLAS_REFCAT2.refcat2 AS r ON n.objid=r.objid ORDER BY n.distance;".format(
 		ra=coo_centre.ra.deg,
 		dec=coo_centre.dec.deg,
-		radius=radius
+		radius=Angle(radius).deg
 	)
 	logger.debug(sql)
 
@@ -140,15 +221,21 @@ def query_casjobs_refcat2(coo_centre, radius=24.0/60.0):
 		for line in output:
 			if len(line.strip()) > 0:
 				error_msg += line.strip() + "\n"
-		raise CasjobsException("ERROR detected in CasJobs: " + error_msg)
+
+		logger.debug("Error Msg: %s", error_msg)
+		if 'query results exceed memory limit' in error_msg.lower():
+			raise CasjobsMemoryError("Query results exceed memory limit")
+		else:
+			raise CasjobsException("ERROR detected in CasJobs: " + error_msg)
 
 	if not results:
 		raise CasjobsException("Could not find anything on CasJobs")
 
+	logger.debug("Found %d results", len(results))
 	return results
 
 #--------------------------------------------------------------------------------------------------
-def query_apass(coo_centre, radius=24.0/60.0):
+def query_apass(coo_centre, radius=24*u.arcmin):
 	"""
 	Queries APASS catalog using cone-search around the position.
 
@@ -164,8 +251,11 @@ def query_apass(coo_centre, radius=24.0/60.0):
 
 	# https://vizier.u-strasbg.fr/viz-bin/VizieR-3?-source=II/336
 
+	if isinstance(radius, (float, int)):
+		radius *= u.deg
+
 	r = requests.post('https://www.aavso.org/cgi-bin/apass_dr10_download.pl',
-		data={'ra': coo_centre.ra.deg, 'dec': coo_centre.dec.deg, 'radius': radius, 'outtype': '1'})
+		data={'ra': coo_centre.ra.deg, 'dec': coo_centre.dec.deg, 'radius': Angle(radius).deg, 'outtype': '1'})
 
 	results = []
 
@@ -192,7 +282,7 @@ def query_apass(coo_centre, radius=24.0/60.0):
 	return results
 
 #--------------------------------------------------------------------------------------------------
-def query_all(coo_centre, radius=24.0/60.0, dist_cutoff=2*u.arcsec):
+def query_all(coo_centre, radius=24*u.arcmin, dist_cutoff=2*u.arcsec):
 	"""
 	Query all catalogs, and return merged catalog.
 
@@ -263,70 +353,82 @@ def query_all(coo_centre, radius=24.0/60.0, dist_cutoff=2*u.arcsec):
 	return results
 
 #--------------------------------------------------------------------------------------------------
-def download_catalog(target=None, radius=24.0/60.0, dist_cutoff=2*u.arcsec):
+def download_catalog(target=None, radius=24*u.arcmin, dist_cutoff=2*u.arcsec):
 
 	logger = logging.getLogger(__name__)
 
 	with AADC_DB() as db:
 
 		# Get the information about the target from the database:
-		if target is None:
-			db.cursor.execute("SELECT targetid,ra,decl FROM flows.targets WHERE catalog_downloaded=FALSE;")
+		if target is not None and isinstance(target, int):
+			db.cursor.execute("SELECT targetid,target_name,ra,decl FROM flows.targets WHERE targetid=%s;", [target])
+		elif target is not None:
+			db.cursor.execute("SELECT targetid,target_name,ra,decl FROM flows.targets WHERE target_name=%s;", [target])
 		else:
-			db.cursor.execute("SELECT targetid,ra,decl FROM flows.targets WHERE targetid=%s;", (target,))
+			db.cursor.execute("SELECT targetid,target_name,ra,decl FROM flows.targets WHERE catalog_downloaded=FALSE;")
 
 		for row in db.cursor.fetchall():
 			# The unique identifier of the target:
 			targetid = int(row['targetid'])
+			target_name = row['target_name']
+
+			# Coordinate of the target, which is the centre of the search cone:
 			coo_centre = SkyCoord(ra=row['ra'], dec=row['decl'], unit=u.deg, frame='icrs')
 
 			results = query_all(coo_centre, radius=radius, dist_cutoff=dist_cutoff)
 
-			# Insert the catalog into the local database:
-			#db.cursor.execute("TRUNCATE flows.refcat2;")
-			db.cursor.executemany("""INSERT INTO flows.refcat2 (
-				starid,
-				ra,
-				decl,
-				pm_ra,
-				pm_dec,
-				gaia_mag,
-				gaia_bp_mag,
-				gaia_rp_mag,
-				gaia_variability,
-				u_mag,
-				g_mag,
-				r_mag,
-				i_mag,
-				z_mag,
-				"J_mag",
-				"H_mag",
-				"K_mag",
-				"V_mag",
-				"B_mag")
-			VALUES (
-				%(starid)s,
-				%(ra)s,
-				%(decl)s,
-				%(pm_ra)s,
-				%(pm_dec)s,
-				%(gaia_mag)s,
-				%(gaia_bp_mag)s,
-				%(gaia_rp_mag)s,
-				%(gaia_variability)s,
-				%(u_mag)s,
-				%(g_mag)s,
-				%(r_mag)s,
-				%(i_mag)s,
-				%(z_mag)s,
-				%(J_mag)s,
-				%(H_mag)s,
-				%(K_mag)s,
-				%(V_mag)s,
-				%(B_mag)s)
-			ON CONFLICT DO NOTHING;""", results)
-			logger.info("%d catalog entries inserted.", db.cursor.rowcount)
+			# Query for a ZTF identifier for this target:
+			ztf_id = query_ztf_id(coo_centre, radius=radius)
 
-			# Mark the target that the catalog has been downloaded:
-			db.cursor.execute("UPDATE flows.targets SET catalog_downloaded=TRUE WHERE targetid=%s;", (targetid,))
-			db.conn.commit()
+			# Insert the catalog into the local database:
+			try:
+				#db.cursor.execute("TRUNCATE flows.refcat2;")
+				db.cursor.executemany("""INSERT INTO flows.refcat2 (
+					starid,
+					ra,
+					decl,
+					pm_ra,
+					pm_dec,
+					gaia_mag,
+					gaia_bp_mag,
+					gaia_rp_mag,
+					gaia_variability,
+					u_mag,
+					g_mag,
+					r_mag,
+					i_mag,
+					z_mag,
+					"J_mag",
+					"H_mag",
+					"K_mag",
+					"V_mag",
+					"B_mag")
+				VALUES (
+					%(starid)s,
+					%(ra)s,
+					%(decl)s,
+					%(pm_ra)s,
+					%(pm_dec)s,
+					%(gaia_mag)s,
+					%(gaia_bp_mag)s,
+					%(gaia_rp_mag)s,
+					%(gaia_variability)s,
+					%(u_mag)s,
+					%(g_mag)s,
+					%(r_mag)s,
+					%(i_mag)s,
+					%(z_mag)s,
+					%(J_mag)s,
+					%(H_mag)s,
+					%(K_mag)s,
+					%(V_mag)s,
+					%(B_mag)s)
+				ON CONFLICT DO NOTHING;""", results)
+				logger.info("%d catalog entries inserted for %s.", db.cursor.rowcount, target_name)
+
+				# Mark the target that the catalog has been downloaded:
+				db.cursor.execute("UPDATE flows.targets SET catalog_downloaded=TRUE,ztf_id=%s WHERE targetid=%s;", (ztf_id, targetid))
+				db.conn.commit()
+			except:
+				db.conn.rollback()
+				raise

@@ -8,7 +8,7 @@ Flows photometry code.
 
 import os
 import numpy as np
-from bottleneck import nanstd, nanmedian
+from bottleneck import nansum, nanmedian, allnan
 from timeit import default_timer
 import logging
 import warnings
@@ -23,6 +23,7 @@ from astropy.nddata import NDData
 from astropy.modeling import models, fitting
 from astropy.wcs.utils import proj_plane_pixel_area
 
+warnings.simplefilter('ignore', category=AstropyDeprecationWarning)
 from photutils import DAOStarFinder, CircularAperture, CircularAnnulus, aperture_photometry
 from photutils.psf import EPSFBuilder, EPSFFitter, BasicPSFPhotometry, DAOGroup, extract_stars
 from photutils import Background2D, SExtractorBackground
@@ -36,6 +37,7 @@ from .plots import plt, plot_image
 from .version import get_version
 from .load_image import load_image
 from .run_imagematch import run_imagematch
+from .zeropoint import bootstrap_outlier, sigma_from_Chauvenet
 
 __version__ = get_version(pep440=False)
 
@@ -101,24 +103,29 @@ def photometry(fileid, output_folder=None, attempt_imagematch=True):
 	#	api.download_datafile(datafile, archive_local)
 
 	# Translate photometric filter into table column:
-	if photfilter == 'gp':
-		ref_filter = 'g_mag'
-	elif photfilter == 'rp':
-		ref_filter = 'r_mag'
-	elif photfilter == 'ip':
-		ref_filter = 'i_mag'
-	elif photfilter == 'zp':
-		ref_filter = 'z_mag'
-	elif photfilter == 'B':
-		ref_filter = 'B_mag'
-	elif photfilter == 'V':
-		ref_filter = 'V_mag'
-	else:
+	ref_filter = {
+		'up': 'u_mag',
+		'gp': 'g_mag',
+		'rp': 'r_mag',
+		'ip': 'i_mag',
+		'zp': 'z_mag',
+		'B': 'B_mag',
+		'V': 'V_mag',
+		'J': 'J_mag',
+		'H': 'H_mag',
+		'K': 'K_mag',
+	}.get(photfilter, None)
+
+	if ref_filter is None:
 		logger.warning("Could not find filter '%s' in catalogs. Using default gp filter.", photfilter)
 		ref_filter = 'g_mag'
 
 	references = catalog['references']
 	references.sort(ref_filter)
+
+	# Check that there actually are reference stars in that filter:
+	if allnan(references[ref_filter]):
+		raise ValueError("No reference stars found in current photfilter.")
 
 	# Load the image from the FITS file:
 	image = load_image(filepath)
@@ -214,19 +221,20 @@ def photometry(fileid, output_folder=None, attempt_imagematch=True):
 	for i, (x, y) in enumerate(zip(references['pixel_column'], references['pixel_row'])):
 		x = int(np.round(x))
 		y = int(np.round(y))
-		x0, y0, width, height = x - radius, y - radius, 2 * radius, 2 * radius
-		cutout = slice(y0 - 1, y0 + height), slice(x0 - 1, x0 + width)
+		xmin = max(x - radius, 0)
+		xmax = min(x + radius + 1, image.shape[1])
+		ymin = max(y - radius, 0)
+		ymax = min(y + radius + 1, image.shape[0])
 
-		curr_star = deepcopy(image.subclean[cutout])
+		curr_star = deepcopy(image.subclean[ymin:ymax, xmin:xmax])
+
 		edge = np.zeros_like(curr_star, dtype='bool')
 		edge[(0,-1),:] = True
 		edge[:,(0,-1)] = True
 		curr_star -= nanmedian(curr_star[edge])
 		curr_star /= np.max(curr_star)
 
-		npix = len(curr_star)
-
-		ypos, xpos = np.mgrid[:npix, :npix]
+		ypos, xpos = np.mgrid[:curr_star.shape[0], :curr_star.shape[1]]
 		gfit = gfitter(g2d, x=xpos, y=ypos, z=curr_star)
 
 		fwhms[i] = gfit.x_fwhm
@@ -353,6 +361,7 @@ def photometry(fileid, output_folder=None, attempt_imagematch=True):
 	plot_image(epsf.data, ax=ax1, cmap='viridis')
 
 	fwhms = []
+	bad_epsf_detected = False
 	for a, ax in ((0, ax3), (1, ax2)):
 		# Collapse the PDF along this axis:
 		profile = epsf.data.sum(axis=a)
@@ -364,27 +373,37 @@ def photometry(fileid, output_folder=None, attempt_imagematch=True):
 		# for some reason
 		profile_intp = UnivariateSpline(np.arange(0, len(profile)), profile - poffset, k=3, s=0, ext=3)
 		lr = profile_intp.roots()
-		axis_fwhm = lr[1] - lr[0]
 
-		fwhms.append(axis_fwhm)
-
+		# Plot the profile and spline:
 		x_fine = np.linspace(-0.5, len(profile)-0.5, 500)
-
 		ax.plot(profile, 'k.-')
 		ax.plot(x_fine, profile_intp(x_fine) + poffset, 'g-')
 		ax.axvline(itop)
-		ax.axvspan(lr[0], lr[1], facecolor='g', alpha=0.2)
 		ax.set_xlim(-0.5, len(profile)-0.5)
+
+		# Do some sanity checks on the ePSF:
+		# It should pass 50% exactly twice and have the maximum inside that region.
+		# I.e. it should be a single gaussian-like peak
+		if len(lr) != 2 or itop < lr[0] or itop > lr[1]:
+			logger.error("Bad PSF along axis %d", a)
+			bad_epsf_detected = True
+		else:
+			axis_fwhm = lr[1] - lr[0]
+			fwhms.append(axis_fwhm)
+			ax.axvspan(lr[0], lr[1], facecolor='g', alpha=0.2)
+
+	# Save the ePSF figure:
+	ax4.axis('off')
+	fig.savefig(os.path.join(output_folder, 'epsf.png'), bbox_inches='tight')
+	plt.close(fig)
+
+	# There was a problem with the ePSF:
+	if bad_epsf_detected:
+		raise Exception("Bad ePSF detected.")
 
 	# Let's make the final FWHM the largest one we found:
 	fwhm = np.max(fwhms)
 	logger.info("Final FWHM based on ePSF: %f", fwhm)
-
-	#ax2.axvspan(itop - fwhm/2, itop + fwhm/2, facecolor='b', alpha=0.2)
-	#ax3.axvspan(itop - fwhm/2, itop + fwhm/2, facecolor='b', alpha=0.2)
-	ax4.axis('off')
-	fig.savefig(os.path.join(output_folder, 'epsf.png'), bbox_inches='tight')
-	plt.close(fig)
 
 	#==============================================================================================
 	# COORDINATES TO DO PHOTOMETRY AT
@@ -527,6 +546,7 @@ def photometry(fileid, output_folder=None, attempt_imagematch=True):
 	mag_inst_err = (2.5/np.log(10)) * (tab['flux_psf_error'] / tab['flux_psf'])
 
 	# Corresponding magnitudes in catalog:
+	#TODO: add color terms here
 	mag_catalog = tab[ref_filter]
 
 	# Mask out things that should not be used in calibration:
@@ -538,20 +558,53 @@ def photometry(fileid, output_folder=None, attempt_imagematch=True):
 	x = mag_catalog[use_for_calibration]
 	y = mag_inst[use_for_calibration]
 	yerr = mag_inst_err[use_for_calibration]
+	weights = 1.0/yerr**2
 
 	# Fit linear function with fixed slope, using sigma-clipping:
 	model = models.Linear1D(slope=1, fixed={'slope': True})
 	fitter = fitting.FittingWithOutlierRemoval(fitting.LinearLSQFitter(), sigma_clip, sigma=3.0)
-	best_fit, sigma_clipped = fitter(model, x, y, weights=1.0/yerr**2)
+	best_fit, sigma_clipped = fitter(model, x, y, weights=weights)
 
-	# Extract zero-point and estimate its error:
+	# Extract zero-point and estimate its error using a single weighted fit:
 	# I don't know why there is not an error-estimate attached directly to the Parameter?
 	zp = -1*best_fit.intercept.value # Negative, because that is the way zeropoints are usually defined
-	zp_error = nanstd(y[~sigma_clipped] - best_fit(x[~sigma_clipped]))
+
+	weights[sigma_clipped] = 0 # Trick to make following expression simpler
+	N = len(weights.nonzero()[0])
+	if N > 1:
+		zp_error = np.sqrt( N * nansum(weights*(y - best_fit(x))**2) / nansum(weights) / (N-1) )
+	else:
+		zp_error = np.NaN
+	logger.info('Leastsquare ZP = {0:0.3f}, ZP_error = {1:0.3f}'.format(zp, zp_error))
+
+	# Determine sigma clipping sigma according to Chauvenet method
+	# But don't allow less than sigma = sigmamin, setting to 1.5 for now.
+	# Should maybe be 2?
+	sigmamin = 1.5
+	sigChauv = sigma_from_Chauvenet(len(x))
+	sigChauv = sigChauv if sigChauv >= sigmamin else sigmamin
+
+	# Extract zero point and error using bootstrap method
+	Nboot = 1000
+	logger.info('Running bootstrap with sigma = {0:0.2f} and n = {1:0.0f}'.format(sigChauv,Nboot))
+	pars = bootstrap_outlier(x, y, yerr, n=Nboot, model=model, fitter=fitting.LinearLSQFitter,
+		outlier=sigma_clip, outlier_kwargs={'sigma':sigChauv}, summary='median',
+		error='bootstrap', return_vals=False)
+
+	zp_bs = pars['intercept'] * -1.0
+	zp_error_bs = pars['intercept_error']
+
+	logger.info('Bootstrapped ZP = {0:0.3f}, ZP_error = {1:0.3f}'.format(zp_bs,zp_error_bs))
+
+	# Check that difference is not large
+	zp_diff = 0.4
+	if np.abs(zp_bs - zp) >= zp_diff:
+		logger.warning("Bootstrap and weighted LSQ ZPs differ by {:0.2f}, \
+		which is more than the allowed {:0.2f} mag.".format(np.abs(zp_bs - zp), zp_diff))
 
 	# Add calibrated magnitudes to the photometry table:
-	tab['mag'] = mag_inst + zp
-	tab['mag_error'] = np.sqrt(mag_inst_err**2 + zp_error**2)
+	tab['mag'] = mag_inst + zp_bs
+	tab['mag_error'] = np.sqrt(mag_inst_err**2 + zp_error_bs**2)
 
 	fig, ax = plt.subplots(1, 1)
 	ax.errorbar(x, y, yerr=yerr, fmt='k.')
@@ -592,8 +645,10 @@ def photometry(fileid, output_folder=None, attempt_imagematch=True):
 	tab.meta['pixel_scale'] = pixel_scale * u.arcsec/u.pixel
 	tab.meta['seeing'] = (fwhm*pixel_scale) * u.arcsec
 	tab.meta['obstime-bmjd'] = float(image.obstime.mjd)
-	tab.meta['zp'] = zp
-	tab.meta['zp_error'] = zp_error
+	tab.meta['zp'] = zp_bs
+	tab.meta['zp_error'] = zp_error_bs
+	tab.meta['zp_diff'] = np.abs(zp_bs - zp)
+	tab.meta['zp_error_weights'] = zp_error
 
 	# Filepath where to save photometry:
 	photometry_output = os.path.join(output_folder, 'photometry.ecsv')

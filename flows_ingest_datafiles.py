@@ -9,7 +9,6 @@ import sys
 import os.path
 import glob
 from astropy.table import Table
-import hashlib
 import shutil
 import gzip
 from zipfile import ZipFile
@@ -19,6 +18,7 @@ from collections import defaultdict
 from flows.aadc_db import AADC_DB
 from flows.plots import plt, plot_image
 from flows.load_image import load_image
+from flows.utilities import get_filehash
 
 #--------------------------------------------------------------------------------------------------
 def flows_get_archive_from_path(fname, archives_list=None):
@@ -59,22 +59,6 @@ def flows_get_archive_from_path(fname, archives_list=None):
 	return archive, relpath
 
 #--------------------------------------------------------------------------------------------------
-def get_filehash(fname):
-	"""Calculate SHA1-hash of file."""
-	buf = 65536
-	s = hashlib.sha1()
-	with open(fname, 'rb') as fid:
-		while True:
-			data = fid.read(buf)
-			if not data:
-				break
-			s.update(data)
-
-	sha1sum = s.hexdigest().lower()
-	if (len(sha1sum) != 40): raise Exception("Invalid file hash")
-	return sha1sum
-
-#--------------------------------------------------------------------------------------------------
 def optipng(fpath):
 	os.system('optipng -preserve -quiet "%s"' % fpath)
 
@@ -88,7 +72,7 @@ class CounterFilter(logging.Filter):
 		super().__init__(*args, **kwargs)
 		self.counter = defaultdict(int)
 
-	def filter(self, record):
+	def filter(self, record): # noqa: A003
 		self.counter[record.levelname] += 1
 		return True
 
@@ -99,12 +83,9 @@ def create_plot(filepath):
 
 	img = load_image(filepath)
 
-	cmap = plt.cm.Blues
-	cmap.set_bad('w')
-
 	fig = plt.figure(figsize=(12,12))
 	ax = fig.add_subplot(111)
-	plot_image(img.clean, ax=ax, scale='linear', percentile=[5, 99], cmap=cmap, cbar='right')
+	plot_image(img.clean, ax=ax, scale='linear', percentile=[5, 99], cbar='right')
 	fig.savefig(output_fpath, bbox_inches='tight')
 	plt.close(fig)
 
@@ -147,7 +128,7 @@ def ingest_from_inbox():
 					if uploadlogid:
 						db.cursor.execute("UPDATE flows.uploadlog SET status='Invalid file type' WHERE logid=%s;", [uploadlogid])
 						db.conn.commit()
-					logger.error("Invalid file type: %s" % os.path.relpath(fpath, rootdir_inbox))
+					logger.error("Invalid file type: %s", os.path.relpath(fpath, rootdir_inbox))
 					continue
 
 				# Get the name of the directory:
@@ -199,7 +180,7 @@ def ingest_from_inbox():
 						if uploadlogid:
 							db.cursor.execute("UPDATE flows.uploadlog SET status='original science image not found' WHERE logid=%s;", [uploadlogid])
 							db.conn.commit()
-						logger.error("ORIGINAL SCIENCE IMAGE COULD NOT BE FOUND: %s" % os.path.basename(fpath))
+						logger.error("ORIGINAL SCIENCE IMAGE COULD NOT BE FOUND: %s", os.path.basename(fpath))
 						continue
 					else:
 						subtracted_original_fileid = subtracted_original_fileid[0]
@@ -248,6 +229,11 @@ def ingest_from_inbox():
 					# Copy the file to its new home:
 					os.makedirs(os.path.dirname(newpath), exist_ok=True)
 					shutil.copy(fpath, newpath)
+
+					# Set file and directory permissions:
+					# TODO: Can this not be handled in a more elegant way?
+					os.chmod(os.path.dirname(newpath), 0o2750)
+					os.chmod(newpath, 0o0440)
 
 					filesize = os.path.getsize(fpath)
 
@@ -324,7 +310,7 @@ def ingest_photometry_from_inbox():
 				if uploadlogid:
 					db.cursor.execute("UPDATE flows.uploadlog SET status='Invalid file type' WHERE logid=%s;", [uploadlogid])
 					db.conn.commit()
-				logger.error("Invalid file type: %s" % os.path.relpath(fpath, rootdir_inbox))
+				logger.error("Invalid file type: %s", os.path.relpath(fpath, rootdir_inbox))
 				continue
 
 			# Get the name of the directory:
@@ -374,9 +360,9 @@ def ingest_photometry_from_inbox():
 					assert targetid_table == targetid
 
 					# Find out which version number to assign to file:
-					db.cursor.execute("SELECT latest_version FROM flows.photometry_summary WHERE fileid_img=%s;", [fileid_img,])
+					db.cursor.execute("SELECT MAX(files.version) AS latest_version FROM flows.files_cross_assoc fca INNER JOIN flows.files ON fca.fileid=files.fileid WHERE fca.associd=%s AND files.datatype=2;", [fileid_img,])
 					latest_version = db.cursor.fetchone()
-					if latest_version is None:
+					if latest_version[0] is None:
 						new_version = 1
 					else:
 						new_version = latest_version[0] + 1
@@ -432,7 +418,7 @@ def ingest_photometry_from_inbox():
 				filesize = os.path.getsize(newpath)
 				filehash = get_filehash(newpath)
 
-				db.cursor.execute("INSERT INTO flows.files (archive,path,targetid,datatype,site,filesize,filehash,obstime,photfilter,version) VALUES (%(archive)s,%(relpath)s,%(targetid)s,%(datatype)s,%(site)s,%(filesize)s,%(filehash)s,%(obstime)s,%(photfilter)s,%(version)s) RETURNING fileid;", {
+				db.cursor.execute("INSERT INTO flows.files (archive,path,targetid,datatype,site,filesize,filehash,obstime,photfilter,version,available) VALUES (%(archive)s,%(relpath)s,%(targetid)s,%(datatype)s,%(site)s,%(filesize)s,%(filehash)s,%(obstime)s,%(photfilter)s,%(version)s,1) RETURNING fileid;", {
 					'archive': archive,
 					'relpath': relpath,
 					'targetid': targetid,
