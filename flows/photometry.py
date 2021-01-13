@@ -23,7 +23,7 @@ from astropy.stats import sigma_clip, SigmaClip, gaussian_fwhm_to_sigma
 from astropy.table import Table, vstack
 from astropy.nddata import NDData
 from astropy.modeling import models, fitting
-from astropy.wcs.utils import proj_plane_pixel_area, fit_wcs_from_points
+from astropy.wcs.utils import proj_plane_pixel_area
 from astropy.time import Time
 
 warnings.simplefilter('ignore', category=AstropyDeprecationWarning)
@@ -43,6 +43,7 @@ from .run_imagematch import run_imagematch
 from .zeropoint import bootstrap_outlier, sigma_from_Chauvenet
 from .wcs import force_reject_g2d, mkposxy, clean_with_rsq_and_get_fwhm, \
 	min_to_max_astroalign, kdtree, get_new_wcs, get_clean_references
+from .wcs2 import WCS
 
 __version__ = get_version(pep440=False)
 
@@ -300,7 +301,12 @@ def photometry(fileid, output_folder=None, attempt_imagematch=True):
 
 		if success_aa or success_kd:
 			# Fit for new WCS
-			image.new_wcs = get_new_wcs(sep_ind, masked_sep_xy, clean_references, ref_ind, image.obstime)
+			#image.new_wcs = get_new_wcs(sep_ind, masked_sep_xy, clean_references, ref_ind, image.obstime)
+			image.new_wcs = WCS.from_astropy_wcs(image.wcs)
+			image.new_wcs.adjust_with_points(
+					xy = masked_sep_xy[sep_ind],
+					rd = list(zip(clean_references['ra'][ref_ind].value, clean_references['decl'][ref_ind].value))
+			)
 			wcs_rotation += 1
 
 			# Calculate pixel-coordinates of references:
