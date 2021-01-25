@@ -75,8 +75,15 @@ def main():
 		tab.write(os.path.join(output_dir, '{0:s}-ztf.ecsv'.format(target_name)),
 			format='ascii.ecsv', delimiter=',')
 
+		# Find time of maxmimum and 14 days from that:
+		indx_min = np.argmin(tab['mag'])
+		maximum_mjd = tab['mjd'][indx_min]
+		fortnight_mjd = maximum_mjd + 14
+
 		# Get LC data out and save as CSV files
 		fig, ax = plt.subplots()
+		ax.axvline(maximum_mjd, ls='--', c='k', lw=0.5, label='Maximum')
+		ax.axvline(fortnight_mjd, ls='--', c='0.5', lw=0.5, label='+14 days')
 		for fid in np.unique(tab['photfilter']):
 			band = tab[tab['photfilter'] == fid]
 			ax.errorbar(band['mjd'], band['mag'], band['mag_err'],

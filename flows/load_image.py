@@ -16,6 +16,48 @@ from astropy.wcs import WCS, FITSFixedWarning
 from . import api
 
 #--------------------------------------------------------------------------------------------------
+def edge_mask(img, value=0):
+	"""
+	Create boolean mask of given value near edge of image.
+
+	Parameters:
+		img (ndarray): Image of
+		value (float): Value to detect near edge. Default=0.
+
+	Returns:
+		ndarray: Pixel mask with given values on the edge of image.
+
+	.. codeauthor:: Rasmus Handberg <rasmush@phys.au.dk>
+	"""
+
+	mask1 = (img == value)
+	mask = np.zeros_like(img, dtype='bool')
+
+	# Mask entire rows and columns which are only the value:
+	mask[np.all(mask1, axis=1), :] = True
+	mask[:, np.all(mask1, axis=0)] = True
+
+	# Detect "uneven" edges column-wise in image:
+	a = np.argmin(mask1, axis=0)
+	b = np.argmin(np.flipud(mask1), axis=0)
+	for col in range(img.shape[1]):
+		if mask1[0, col]:
+			mask[:a[col], col] = True
+		if mask1[-1, col]:
+			mask[-b[col]:, col] = True
+
+	# Detect "uneven" edges row-wise in image:
+	a = np.argmin(mask1, axis=1)
+	b = np.argmin(np.fliplr(mask1), axis=1)
+	for row in range(img.shape[0]):
+		if mask1[row, 0]:
+			mask[row, :a[row]] = True
+		if mask1[row, -1]:
+			mask[row, -b[row]:] = True
+
+	return mask
+
+#--------------------------------------------------------------------------------------------------
 def load_image(FILENAME):
 	"""
 	Load FITS image.
@@ -36,6 +78,8 @@ def load_image(FILENAME):
 	with fits.open(FILENAME, mode='readonly') as hdul:
 		hdr = hdul[0].header
 		origin = hdr.get('ORIGIN')
+		telescope = hdr.get('TELESCOP')
+		instrument = hdr.get('INSTRUME')
 
 		image.image = np.asarray(hdul[0].data)
 		image.shape = image.image.shape
@@ -46,8 +90,6 @@ def load_image(FILENAME):
 			image.mask = np.zeros_like(image.image, dtype='bool')
 
 		image.mask |= ~np.isfinite(image.image)
-
-		image.clean = np.ma.masked_array(image.image, image.mask)
 
 		# World Coordinate System:
 		with warnings.catch_warnings():
@@ -74,7 +116,7 @@ def load_image(FILENAME):
 			#image.peakmax = hdr.get('MAXLIN') # Presumed non-linearity limit from header
 			image.peakmax = 60000 # From experience, this one is better.
 
-		elif hdr.get('TELESCOP') == 'NOT' and hdr.get('INSTRUME') in ('ALFOSC FASU', 'ALFOSC_FASU') and hdr.get('OBS_MODE') == 'IMAGING':
+		elif telescope == 'NOT' and instrument in ('ALFOSC FASU', 'ALFOSC_FASU') and hdr.get('OBS_MODE', '').lower() == 'imaging':
 			image.site = api.get_site(5) # Hard-coded the siteid for NOT
 			image.obstime = Time(hdr['DATE-AVG'], format='isot', scale='utc', location=image.site['EarthLocation'])
 
@@ -110,7 +152,7 @@ def load_image(FILENAME):
 			# TODO: grab these from a table for all detector setups of ALFOSC
 			image.peakmax = 80000 # For ALFOSC D, 1x1, 200; the standard for SNe.
 
-		elif hdr.get('TELESCOP') == 'NOT' and hdr.get('INSTRUME') == 'NOTCAM' and hdr.get('OBS_MODE', '').lower() == 'imaging':
+		elif telescope == 'NOT' and instrument == 'NOTCAM' and hdr.get('OBS_MODE', '').lower() == 'imaging':
 			image.site = api.get_site(5) # Hard-coded the siteid for NOT
 			image.obstime = Time(hdr['DATE-AVG'], format='isot', scale='utc', location=image.site['EarthLocation'])
 
@@ -128,6 +170,9 @@ def load_image(FILENAME):
 			else:
 				raise Exception("Could not determine filter used.")
 
+			# Mask out "halo" of pixels with zero value along edge of image:
+			image.mask |= edge_mask(image.image, value=0)
+
 		elif hdr.get('FPA.TELESCOPE') == 'PS1' and hdr.get('FPA.INSTRUMENT') == 'GPC1':
 			image.site = api.get_site(6) # Hard-coded the siteid for Pan-STARRS1
 			image.obstime = Time(hdr['MJD-OBS'], format='mjd', scale='utc', location=image.site['EarthLocation'])
@@ -139,7 +184,7 @@ def load_image(FILENAME):
 				'z.00000': 'zp'
 			}.get(hdr['FPA.FILTER'], hdr['FPA.FILTER'])
 
-		elif hdr.get('TELESCOP') == 'Liverpool Telescope':
+		elif telescope == 'Liverpool Telescope':
 			# Liverpool telescope
 			image.site = api.get_site(8) # Hard-coded the siteid for Liverpool Telescope
 			image.obstime = Time(hdr['DATE-OBS'], format='isot', scale='utc', location=image.site['EarthLocation'])
@@ -156,14 +201,73 @@ def load_image(FILENAME):
 				'SDSS-Z': 'zp'
 			}.get(hdr['FILTER1'], hdr['FILTER1'])
 
-		elif hdr.get('TELESCOP') == 'CA 3.5m' and hdr.get('INSTRUME') == 'Omega2000':
+		elif telescope == 'CA 3.5m' and instrument == 'Omega2000':
 			# Calar Alto 3.5m (Omege2000)
 			image.site = api.get_site(9) # Hard-coded the siteid for Calar Alto 3.5m
 			image.obstime = Time(hdr['MJD-OBS'], format='mjd', scale='utc', location=image.site['EarthLocation'])
 			image.obstime += 0.5*image.exptime * u.second # Make time centre of exposure
 			image.photfilter = hdr['FILTER']
 
+		elif telescope == 'SWO' and hdr.get('SITENAME') == 'LCO':
+			image.site = api.get_site(10) # Hard-coded the siteid for Swope, Las Campanas Observatory
+			image.obstime = Time(hdr['JD'], format='jd', scale='utc', location=image.site['EarthLocation'])
+			image.photfilter = {
+				'u': 'up',
+				'g': 'gp',
+				'r': 'rp',
+				'i': 'ip',
+			}.get(hdr['FILTER'], hdr['FILTER'])
+
+		elif telescope == 'DUP' and hdr.get('SITENAME') == 'LCO':
+			image.site = api.get_site(14) # Hard-coded the siteid for Du Pont, Las Campanas Observatory
+			image.obstime = Time(hdr['JD'], format='jd', scale='utc', location=image.site['EarthLocation'])
+			image.photfilter = {
+				'u': 'up',
+				'g': 'gp',
+				'r': 'rp',
+				'i': 'ip',
+			}.get(hdr['FILTER'], hdr['FILTER'])
+
+		elif telescope == 'Baade' and hdr.get('SITENAME') == 'LCO' and instrument == 'FourStar':
+			image.site = api.get_site(11) # Hard-coded the siteid for Swope, Las Campanas Observatory
+			image.obstime = Time(hdr['JD'], format='jd', scale='utc', location=image.site['EarthLocation'])
+			image.photfilter = {
+				'Ks': 'K',
+				'J1': 'Y',
+			}.get(hdr['FILTER'], hdr['FILTER'])
+			image.exptime *= int(hdr['NCOMBINE']) # EXPTIME is only for a single exposure
+
+		elif origin == 'ESO' and telescope == 'ESO-NTT' and instrument == 'SOFI':
+			image.site = api.get_site(12) # Hard-coded the siteid for SOFT, ESO NTT
+			image.obstime = Time(hdr['TMID'], format='mjd', scale='utc', location=image.site['EarthLocation'])
+			image.photfilter = hdr['FILTER']
+
+			# Mask out "halo" of pixels with zero value along edge of image:
+			image.mask |= edge_mask(image.image, value=0)
+
+		elif origin == 'ESO' and telescope == 'ESO-NTT' and instrument == 'EFOSC':
+			image.site = api.get_site(15) # Hard-coded the siteid for EFOSC, ESO NTT
+			image.obstime = Time(hdr['DATE-OBS'], format='isot', scale='utc', location=image.site['EarthLocation'])
+			image.obstime += 0.5*image.exptime * u.second # Make time centre of exposure
+			image.photfilter = {
+				'g782': 'gp',
+				'B639': 'B',
+			}.get(hdr['FILTER'], hdr['FILTER'])
+
+		elif telescope == 'SAI-2.5' and instrument == 'ASTRONIRCAM':
+			image.site = api.get_site(13) # Hard-coded the siteid for Caucasus Mountain Observatory
+			image.obstime = Time(hdr['MJD-AVG'], format='mjd', scale='utc', location=image.site['EarthLocation'])
+			image.photfilter = {
+				'H_Open': 'H',
+				'K_Open': 'K',
+			}.get(hdr['FILTER'], hdr['FILTER'])
+			image.exptime = float(hdr['FULL_EXP'])
+
 		else:
 			raise Exception("Could not determine origin of image")
+
+	# Create masked version of image:
+	image.image[image.mask] = np.NaN
+	image.clean = np.ma.masked_array(image.image, image.mask)
 
 	return image
