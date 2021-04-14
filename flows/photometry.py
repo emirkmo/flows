@@ -15,7 +15,7 @@ from timeit import default_timer
 import logging
 import warnings
 
-from astropy.utils.exceptions import AstropyDeprecationWarning, AstropyUserWarning
+from astropy.utils.exceptions import AstropyDeprecationWarning, AstropyUserWarning, ErfaWarning
 import astropy.units as u
 import astropy.coordinates as coords
 from astropy.stats import sigma_clip, SigmaClip
@@ -48,6 +48,38 @@ from .epsfbuilder import EPSFBuilder, gaussian_kernel
 __version__ = get_version(pep440=False)
 
 warnings.simplefilter('ignore', category=AstropyDeprecationWarning)
+
+from functools import wraps
+
+class BasicPSFPhotometry(BasicPSFPhotometry):
+
+    def nstar(self, image, star_groups):
+
+        if not type(self.fitter) is fitting.LevMarLSQFitter:
+
+            return super().nstar(image, star_groups)
+
+        def fitter(func):
+
+            @wraps(func)
+            def wrapper(group_psf, x, y, image):
+
+                weights = self._weights[y, x]
+                return func(group_psf, x, y, image, weights=weights)
+
+            return wrapper
+
+        self.fitter = fitter(self.fitter)
+        res = super().nstar(image, star_groups)
+        self.fitter = self.fitter.__wrapped__
+
+        return res
+
+    def __call__(self, image, init_guesses=None, weights=None):
+
+        self._weights = weights if not weights is None else np.ones_like(image)
+
+        return super().__call__(image, init_guesses)
 
 # --------------------------------------------------------------------------------------------------
 def photometry(fileid, output_folder=None, attempt_imagematch=True, keep_diff_fixed=False, timeoutpar=10):
@@ -133,6 +165,7 @@ def photometry(fileid, output_folder=None, attempt_imagematch=True, keep_diff_fi
         ref_filter = 'g_mag'
 
     # Load the image from the FITS file:
+    logger.info("Load image '%s'", filepath)
     image = load_image(filepath)
 
     lsqhdus = get_fitscmd(image, 'localseq') # look for local sequence in fits table
@@ -203,7 +236,10 @@ def photometry(fileid, output_folder=None, attempt_imagematch=True, keep_diff_fi
     refs_coord = coords.SkyCoord(ra=references['ra'], dec=references['decl'],
                                  pm_ra_cosdec=references['pm_ra'], pm_dec=references['pm_dec'],
                                  unit='deg', frame='icrs', obstime=Time(2015.5, format='decimalyear'))
-    refs_coord = refs_coord.apply_space_motion(image.obstime)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ErfaWarning)
+        refs_coord = refs_coord.apply_space_motion(image.obstime)
 
     # @TODO: These need to be based on the instrument!
     radius = 10
@@ -335,13 +371,13 @@ def photometry(fileid, output_folder=None, attempt_imagematch=True, keep_diff_fi
     size = max(size, 15)  # Never go below 15 pixels
 
     # Extract stars sub-images:
-    xy = [tuple(masked_ref_xys[clean_references['starid'] == ref['starid']].data[0]) for ref in references] # FIXME !!!
+    xy = [tuple(masked_ref_xys[clean_references['starid'] == ref['starid']].data[0]) for ref in references] # FIXME
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', AstropyUserWarning)
         stars = extract_stars(
-            NDData(data=image.subclean, mask=image.mask),
+            NDData(data=image.subclean.data, mask=image.mask),
             Table(np.array(xy), names=('x', 'y')),
-            size = size + 6#2*size+1 # +6 for edge buffer
+            size = size + 6 # +6 for edge buffer
         )
 
     # Store which stars were used in ePSF in the table:
@@ -360,7 +396,7 @@ def photometry(fileid, output_folder=None, attempt_imagematch=True, keep_diff_fi
                 ax[i].axis('off')
             else:
                 offset_axes = stars[imgnr].bbox.ixmin, stars[imgnr].bbox.iymin
-                plot_image(stars[imgnr], ax=ax[i], scale='log', cmap='viridis')#, offset_axes=offset_axes)
+                plot_image(stars[imgnr], ax=ax[i], scale='log', cmap='viridis')#, offset_axes=offset_axes) FIXME (no x-ticks)
             imgnr += 1
 
         fig.savefig(os.path.join(output_folder, 'epsf_stars%02d.png' % (k + 1)), bbox_inches='tight')
@@ -465,7 +501,8 @@ def photometry(fileid, output_folder=None, attempt_imagematch=True, keep_diff_fi
 
     psfphot_tbl = photometry_obj(
         image=image.subclean,
-        init_guesses=Table(coordinates, names=['x_0', 'y_0'])
+        init_guesses=Table(coordinates, names=['x_0', 'y_0']),
+        weights=1/np.sqrt(image.image)
     )
 
     logger.info('PSF Photometry Success')
@@ -545,7 +582,8 @@ def photometry(fileid, output_folder=None, attempt_imagematch=True, keep_diff_fi
         # Run PSF photometry on template subtracted image:
         target_psfphot_tbl = photometry_obj(
             diffimage if masked_diffimage is None else masked_diffimage,
-            init_guesses=Table(target_pixel_pos, names=['x_0', 'y_0'])
+            init_guesses=Table(target_pixel_pos, names=['x_0', 'y_0']),
+            weights=1/np.sqrt(image.image)
         )
 
         if keep_diff_fixed:  # Need to adjust table columns if x_0 and y_0 were fixed
