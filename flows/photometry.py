@@ -27,7 +27,7 @@ from astropy.time import Time
 
 warnings.simplefilter('ignore', category=AstropyDeprecationWarning)
 from photutils import CircularAperture, CircularAnnulus, aperture_photometry
-from photutils.psf import EPSFFitter, BasicPSFPhotometry, DAOGroup, extract_stars
+from photutils.psf import EPSFFitter, DAOGroup, extract_stars
 from photutils import Background2D, SExtractorBackground, MedianBackground
 from photutils.utils import calc_total_error
 
@@ -44,42 +44,11 @@ from .wcs import force_reject_g2d, clean_with_rsq_and_get_fwhm, get_clean_refere
 from .coordinatematch import CoordinateMatch, WCS
 from .fitscmd import get_fitscmd, maskstar, localseq, colorterm
 from .epsfbuilder import EPSFBuilder, gaussian_kernel
+from .psfphotometry import BasicPSFPhotometry
 
 __version__ = get_version(pep440=False)
 
 warnings.simplefilter('ignore', category=AstropyDeprecationWarning)
-
-from functools import wraps
-
-class BasicPSFPhotometry(BasicPSFPhotometry):
-
-    def nstar(self, image, star_groups):
-
-        if not type(self.fitter) is fitting.LevMarLSQFitter:
-
-            return super().nstar(image, star_groups)
-
-        def fitter(func):
-
-            @wraps(func)
-            def wrapper(group_psf, x, y, image):
-
-                weights = self._weights[y, x]
-                return func(group_psf, x, y, image, weights=weights)
-
-            return wrapper
-
-        self.fitter = fitter(self.fitter)
-        res = super().nstar(image, star_groups)
-        self.fitter = self.fitter.__wrapped__
-
-        return res
-
-    def __call__(self, image, init_guesses=None, weights=None):
-
-        self._weights = weights if not weights is None else np.ones_like(image)
-
-        return super().__call__(image, init_guesses)
 
 # --------------------------------------------------------------------------------------------------
 def photometry(fileid, output_folder=None, attempt_imagematch=True, keep_diff_fixed=False, timeoutpar=10):
