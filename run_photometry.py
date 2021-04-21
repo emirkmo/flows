@@ -16,7 +16,7 @@ from flows import api, photometry, load_config
 
 # --------------------------------------------------------------------------------------------------
 def process_fileid(fid, output_folder_root=None, attempt_imagematch=True, autoupload=False, keep_diff_fixed=False,
-                   timeoutpar=10):
+                   timeoutpar='None'):
     logger = logging.getLogger('flows')
     logging.captureWarnings(True)
     logger_warn = logging.getLogger('py.warnings')
@@ -86,6 +86,7 @@ if __name__ == '__main__':
     group.add_argument('--fileid', help="Process this file ID. Overrides all other filters.", type=int, default=None)
     group.add_argument('--targetid', help="Only process files from this target.", type=int, default=None)
     group.add_argument('--filter', type=str, default=None, choices=['missing', 'all', 'error'])
+    group.add_argument('--targetids', help="run all target ids", type=int, nargs='+', default=[None])
 
     group = parser.add_argument_group('Processing details')
     group.add_argument('--threads', type=int, default=1, help="Number of parallel threads to use.")
@@ -98,11 +99,11 @@ if __name__ == '__main__':
                        help="Fix SN position during PSF photometry of difference image. \
                        Useful when difference image is noisy.",
                        action='store_true')
-    group.add_argument('--timeoutpar', type=int, default=10, help='Timeout in Seconds for WCS')
+    group.add_argument('--timeoutpar', type=int, default='None', help="Timeout in Seconds for WCS")
     args = parser.parse_args()
 
     # Ensure that all input has been given:
-    if not args.fileid and not args.targetid and args.filter is None:
+    if not args.fileid and not args.targetid and args.filter is None and args.targetids[0] is None:
         parser.error("Please select either a specific FILEID .")
 
     # Set logging level:
@@ -130,6 +131,10 @@ if __name__ == '__main__':
     if args.fileid is not None:
         # Run the specified fileid:
         fileids = [args.fileid]
+    elif args.targetids[0] is not None:
+        # Run the specified targetids
+        fileids2d = [api.get_datafiles(targetid=tar, filt=args.filter) for tar in args.targetids]
+        fileids = [item for sublist in fileids2d for item in sublist]  #get flat list
     else:
         # Ask the API for a list of fileids which are yet to be processed:
         fileids = api.get_datafiles(targetid=args.targetid, filt=args.filter)
